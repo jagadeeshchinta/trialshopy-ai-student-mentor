@@ -467,7 +467,7 @@ export default function DashboardPage() {
 
           {/* ────── PERSONALIZED 4-WEEK ROADMAP & MOBILE HANDOFF ────── */}
           <motion.div variants={itemVariants} className="mt-8">
-            <PersonalizedRoadmap weakSubjects={data.areasForImprovement} />
+            <PersonalizedRoadmap weakSubjects={data.areasForImprovement} studentName={data.name} />
           </motion.div>
 
         </motion.div>

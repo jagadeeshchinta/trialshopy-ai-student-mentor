@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Sparkles,
@@ -22,6 +22,7 @@ import {
   Target,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
+import { getShareRoadmapUrl } from '@/lib/shareUrl';
 
 export interface RoadmapItem {
   week: number;
@@ -64,10 +65,12 @@ const GOAL_OPTIONS: GoalOption[] = [
 
 export interface PersonalizedRoadmapProps {
   weakSubjects?: string[];
+  studentName?: string;
 }
 
 export default function PersonalizedRoadmap({
   weakSubjects = ['Operating Systems', 'Advanced Computer Networks'],
+  studentName = 'Jagadeesh Chinta',
 }: PersonalizedRoadmapProps = {}) {
   const [selectedGoal, setSelectedGoal] = useState<string>(GOAL_OPTIONS[0].id);
   const [roadmap, setRoadmap] = useState<RoadmapItem[]>([]);
@@ -77,9 +80,17 @@ export default function PersonalizedRoadmap({
   // In-memory cache by career goal to prevent duplicate API calls and save quota
   const roadmapCacheRef = useRef<Record<string, RoadmapItem[]>>({});
 
-  const shareableUrl = `https://trialshopy-mentor.vercel.app/share/roadmap-${encodeURIComponent(
-    selectedGoal.toLowerCase().replace(/[^a-z0-9]/g, '-')
-  )}`;
+  // Dynamic origin + URL-encoded payload for scannable mobile handoff
+  const shareUrl = useMemo(() => {
+    return getShareRoadmapUrl(
+      {
+        goal: selectedGoal,
+        studentName,
+        roadmap,
+      },
+      'live'
+    );
+  }, [selectedGoal, studentName, roadmap]);
 
   // Fetch roadmap when selectedGoal changes, checking memory and sessionStorage cache first
   useEffect(() => {
@@ -183,7 +194,7 @@ export default function PersonalizedRoadmap({
   }, [selectedGoal, weakSubjects]);
 
   const handleCopy = () => {
-    navigator.clipboard?.writeText(shareableUrl);
+    navigator.clipboard?.writeText(shareUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -430,7 +441,7 @@ export default function PersonalizedRoadmap({
         {/* QR Code Graphic with Glowing Border */}
         <div className="p-3 rounded-2xl bg-slate-950 border-2 border-indigo-400/40 shadow-[0_0_20px_rgba(99,102,241,0.3)] shrink-0 flex items-center justify-center">
           <QRCodeSVG
-            value={shareableUrl}
+            value={shareUrl}
             size={110}
             bgColor="transparent"
             fgColor="#ffffff"

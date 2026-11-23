@@ -44,11 +44,11 @@ export default function MobileHandoffScreen() {
   // Point directly to the live mobile companion route
   const relativeMobileUrl = `/mobile-roadmap/${studentId}`;
 
-  // Get full origin if available on client
+  // Get full origin if available on client with live Vercel fallback during SSR
   const fullMobileUrl =
-    typeof window !== 'undefined'
+    typeof window !== 'undefined' && window.location.origin
       ? `${window.location.origin}${relativeMobileUrl}`
-      : `http://localhost:3000${relativeMobileUrl}`;
+      : `https://trialshopy-ai-student-mentor.vercel.app${relativeMobileUrl}`;
 
   const handleDownloadPdf = () => {
     if (activeStudent) {
