@@ -1,18 +1,6 @@
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { generateObject } from 'ai';
-import { z } from 'zod';
+import { callGeminiWithFallback } from '@/lib/geminiFetch';
 
 export const runtime = 'edge';
-
-const MODEL_NAME = 'gemini-3.5-flash-lite';
-
-// Zod schema for expected 4-week study roadmap output
-export const roadmapItemSchema = z.object({
-  week: z.number().describe('Week number from 1 to 4'),
-  topic: z.string().describe('Key technical topic or foundational concept for the week'),
-  actionItem: z.string().describe('Specific, concise, hands-on task to complete'),
-  resourceType: z.string().describe('Recommended learning resource type e.g. YouTube Video, Article, Lab, Documentation'),
-});
 
 export async function POST(req: Request) {
   try {
@@ -24,10 +12,6 @@ export async function POST(req: Request) {
       );
     }
 
-    const google = createGoogleGenerativeAI({
-      apiKey,
-    });
-
     const body = await req.json().catch(() => ({}));
     const goal = body.goal || 'Software Development Engineer';
     const weakSubjects = Array.isArray(body.weakSubjects) && body.weakSubjects.length > 0
@@ -38,32 +22,61 @@ export async function POST(req: Request) {
 
     const prompt = `You are an expert academic planner. Create a 4-week actionable study roadmap for a student who wants to achieve ${goal} but struggles with ${weakSubjectsText}. Keep action items highly specific and concise.`;
 
+    const payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: `${prompt}
+
+Return a strictly valid JSON array of 4 objects matching this schema:
+[
+  {
+    "week": 1,
+    "topic": "string",
+    "actionItem": "string",
+    "resourceType": "YouTube Video" | "Article" | "Interactive Lab" | "Documentation"
+  }
+]`,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+      },
+    };
+
     let roadmap = null;
 
     try {
-      // Strictly locked to gemini-3.5-flash-lite
-      const result = await generateObject({
-        model: google(MODEL_NAME),
-        output: 'array',
-        schema: roadmapItemSchema,
-        prompt,
-      });
+      // Resilient call: gemini-3.5-flash-lite -> 1s retry on 503 -> gemini-3.6-flash on 503/429
+      const res = await callGeminiWithFallback(payload);
 
-      if (Array.isArray(result.object) && result.object.length > 0) {
-        roadmap = result.object;
-      }
-    } catch (err: any) {
-      console.warn(`Model ${MODEL_NAME} call error:`, err?.message);
-      const is429 = err?.status === 429 || err?.statusCode === 429 || (typeof err?.message === 'string' && err.message.includes('429'));
-      if (is429) {
+      if (res.status === 429) {
         return Response.json(
           { error: 'Daily API quota reached. Please wait a minute or switch to a backup project key.' },
           { status: 429 }
         );
       }
+
+      if (res.ok) {
+        const data = await res.json();
+        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (rawText) {
+          const cleanJson = rawText.replace(/```json|```/g, '').trim();
+          const parsed = JSON.parse(cleanJson);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            roadmap = parsed;
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn('Roadmap generation error:', err?.message);
     }
 
-    // Graceful offline fallback if temporary network/service issue
+    // Graceful curated fallback if temporary offline or parse failure
     if (!roadmap || !Array.isArray(roadmap) || roadmap.length === 0) {
       roadmap = [
         {

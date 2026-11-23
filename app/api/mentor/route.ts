@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { callGeminiWithFallback } from '@/lib/geminiFetch';
 import type { StudentProfile } from '@/types/kiosk';
 
 interface ChatMessage {
@@ -143,23 +144,15 @@ STRICT GUIDELINES:
       })),
     ];
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`;
-
-    const geminiRes = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
+    const payload = {
+      contents,
+      generationConfig: {
+        temperature: 0.5,
+        maxOutputTokens: 500,
       },
-      body: JSON.stringify({
-        contents,
-        generationConfig: {
-          temperature: 0.5,
-          maxOutputTokens: 500,
-        },
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+    };
+
+    const geminiRes = await callGeminiWithFallback(payload);
 
     if (geminiRes.status === 429) {
       return NextResponse.json(

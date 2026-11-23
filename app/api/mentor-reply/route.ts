@@ -1,6 +1,6 @@
-export const runtime = 'edge';
+import { callGeminiWithFallback } from '@/lib/geminiFetch';
 
-const MODEL_NAME = 'gemini-3.5-flash-lite';
+export const runtime = 'edge';
 
 export async function POST(req: Request) {
   try {
@@ -30,34 +30,27 @@ ${identityContext}
 The camera initially thought the student looked ${emotion}. The student just told you: '${userText}'. 
 CRITICAL INSTRUCTION: You MUST respond directly to what the student just said. If they introduce themselves, acknowledge their name. If they say the camera was wrong and they are actually happy, apologize playfully and match their happy energy. If they mention a specific problem, address that exact problem. Do not use generic fallback phrases. Keep it to 2 short sentences. Plain text only. No markdown.`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:streamGenerateContent?alt=sse`;
-
-    const geminiRes = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
+    const payload = {
+      systemInstruction: {
+        parts: [{ text: systemPrompt }],
       },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: systemPrompt }],
+      contents: [
+        {
+          parts: [
+            {
+              text: `Student input: "${userText}". Detected mood: "${emotion}". Respond in 2 sentences.`,
+            },
+          ],
         },
-        contents: [
-          {
-            parts: [
-              {
-                text: `Student input: "${userText}". Detected mood: "${emotion}". Respond in 2 sentences.`,
-              },
-            ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 120,
-        },
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+      ],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 120,
+      },
+    };
+
+    // Resilient call: gemini-3.5-flash-lite -> 1s retry on 503 -> gemini-3.6-flash on 503/429
+    const geminiRes = await callGeminiWithFallback(payload, { stream: true });
 
     // ── RATE LIMIT / QUOTA HANDLING (429) ──
     if (geminiRes.status === 429) {

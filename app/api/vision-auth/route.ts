@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server';
 import { STUDENT_DIRECTORY } from '@/lib/data/studentDirectory';
+import { callGeminiWithFallback } from '@/lib/geminiFetch';
 
 export const runtime = 'edge';
-
-const MODEL_NAME = 'gemini-3.5-flash-lite';
 
 export async function POST(req: Request) {
   try {
@@ -87,24 +86,16 @@ Return raw JSON strictly matching this schema:
       });
     }
 
-    // Strictly locked to gemini-3.5-flash-lite endpoint
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent`;
-
-    const res = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
+    const payload = {
+      contents: [{ parts }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.1,
       },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      }),
-      signal: AbortSignal.timeout(25000),
-    });
+    };
+
+    // Resilient call: gemini-3.5-flash-lite -> 1s retry on 503 -> gemini-3.6-flash on 503/429
+    const res = await callGeminiWithFallback(payload);
 
     // ── RATE LIMIT / QUOTA HANDLING (429) ──
     if (res.status === 429) {

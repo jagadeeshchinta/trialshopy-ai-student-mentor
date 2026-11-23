@@ -1,9 +1,7 @@
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { streamText, convertToModelMessages } from 'ai';
+import { createUIMessageStreamResponse } from 'ai';
+import { callGeminiWithFallback } from '@/lib/geminiFetch';
 
 export const runtime = 'edge';
-
-const MODEL_NAME = 'gemini-3.5-flash-lite';
 
 export async function POST(req: Request) {
   try {
@@ -14,10 +12,6 @@ export async function POST(req: Request) {
         { status: 500, headers: { 'Content-Type': 'application/json' } }
       );
     }
-
-    const google = createGoogleGenerativeAI({
-      apiKey,
-    });
 
     const body = await req.json().catch(() => ({}));
     const { messages = [], studentData } = body;
@@ -41,36 +35,119 @@ ${studentContext}
 
 Act like a supportive teacher. If they ask about their performance, reference their actual data (e.g., praise their 7.5 CGPA or offer help with their specific weak subjects). Keep responses highly concise, conversational, and encouraging. Never output raw JSON or code snippets. Use plain text formatting.`;
 
-    // Normalize messages to UI Message structure with parts
-    const normalizedMessages = Array.isArray(messages)
-      ? messages.map((m: any, index: number) => ({
-          id: m.id || `msg-${index}-${Date.now()}`,
-          role: m.role || 'user',
-          parts: Array.isArray(m.parts) && m.parts.length > 0
-            ? m.parts
-            : [{ type: 'text', text: typeof m.content === 'string' ? m.content : '' }],
-        }))
+    const contents = Array.isArray(messages)
+      ? messages.map((m: any) => {
+          const role = m.role === 'assistant' ? 'model' : 'user';
+          let text = '';
+          if (typeof m.content === 'string') {
+            text = m.content;
+          } else if (Array.isArray(m.parts)) {
+            text = m.parts
+              .map((p: any) => (typeof p === 'string' ? p : p?.text || ''))
+              .join('');
+          }
+          return {
+            role,
+            parts: [{ text: text || 'Hello' }],
+          };
+        })
       : [];
 
-    const modelMessages = await convertToModelMessages(normalizedMessages);
+    const payload = {
+      systemInstruction: {
+        parts: [{ text: systemPrompt }],
+      },
+      contents: contents.length > 0 ? contents : [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 600,
+      },
+    };
 
-    // Strictly locked to gemini-3.5-flash-lite
-    const result = streamText({
-      model: google(MODEL_NAME),
-      system: systemPrompt,
-      messages: modelMessages,
-    });
+    // Resilient call: gemini-3.5-flash-lite -> 1s retry on 503 -> gemini-3.6-flash on 503/429
+    const geminiRes = await callGeminiWithFallback(payload, { stream: true });
 
-    return result.toUIMessageStreamResponse();
-  } catch (err: any) {
-    console.error('Chat API Error:', err);
-    const is429 = err?.status === 429 || err?.statusCode === 429 || (typeof err?.message === 'string' && err.message.includes('429'));
-    if (is429) {
+    if (geminiRes.status === 429) {
       return new Response(
         JSON.stringify({ error: 'Daily API quota reached. Please wait a minute or switch to a backup project key.' }),
         { status: 429, headers: { 'Content-Type': 'application/json' } }
       );
     }
+
+    if (!geminiRes.ok) {
+      const errBody = await geminiRes.json().catch(() => null);
+      return new Response(
+        JSON.stringify({ error: errBody?.error?.message || `Gemini API error ${geminiRes.status}` }),
+        { status: geminiRes.status, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (!geminiRes.body) {
+      return new Response(
+        JSON.stringify({ error: 'No response body stream received from Gemini API' }),
+        { status: 502, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Stream SSE events formatted for Vercel AI SDK useChat
+    const reader = geminiRes.body.getReader();
+    const decoder = new TextDecoder();
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        controller.enqueue({ type: 'start' });
+        controller.enqueue({ type: 'start-step' });
+        controller.enqueue({ type: 'text-start', id: '0' });
+
+        let buffer = '';
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                const jsonStr = trimmed.slice(6);
+                try {
+                  const parsed = JSON.parse(jsonStr);
+                  const delta = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+                  if (delta) {
+                    controller.enqueue({ type: 'text-delta', id: '0', delta });
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+
+          if (buffer.trim().startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(buffer.trim().slice(6));
+              const delta = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (delta) {
+                controller.enqueue({ type: 'text-delta', id: '0', delta });
+              }
+            } catch (_) {}
+          }
+
+          controller.enqueue({ type: 'finish-step' });
+          controller.enqueue({ type: 'finish' });
+        } catch (err: any) {
+          controller.enqueue({ type: 'finish-step' });
+          controller.enqueue({ type: 'finish' });
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return createUIMessageStreamResponse({ stream });
+  } catch (err: any) {
+    console.error('Chat API Error:', err);
     return new Response(
       JSON.stringify({ error: err?.message || 'Chat generation failed' }),
       { status: err?.status || 500, headers: { 'Content-Type': 'application/json' } }
